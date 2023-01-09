@@ -23,12 +23,13 @@ use near_primitives::trie_key::TrieKey;
 use near_primitives::types::chunk_extra::ChunkExtra;
 use near_primitives::types::{BlockHeight, ShardId, StateRoot};
 use near_primitives_core::types::Gas;
+use near_store::db::Database;
 use near_store::test_utils::create_test_store;
+use near_store::Store;
 use near_store::Trie;
 use near_store::TrieCache;
 use near_store::TrieCachingStorage;
 use near_store::TrieConfig;
-use near_store::{NodeStorage, Store};
 use nearcore::{NearConfig, NightshadeRuntime};
 use node_runtime::adapter::ViewRuntimeAdapter;
 use serde_json::json;
@@ -415,8 +416,8 @@ pub(crate) fn get_receipt(receipt_id: CryptoHash, near_config: NearConfig, store
     println!("Receipt: {:#?}", receipt);
 }
 
-pub(crate) fn peers(store: NodeStorage) {
-    iter_peers_from_store(store, |(peer_id, peer_info)| {
+pub(crate) fn peers(db: Arc<dyn Database>) {
+    iter_peers_from_store(db, |(peer_id, peer_info)| {
         println!("{} {:?}", peer_id, peer_info);
     })
 }
@@ -734,6 +735,14 @@ pub(crate) fn print_epoch_info(
     );
 }
 
+fn get_trie(store: Store, hash: CryptoHash, shard_id: u32, shard_version: u32) -> Trie {
+    let shard_uid = ShardUId { version: shard_version, shard_id };
+    let trie_config: TrieConfig = Default::default();
+    let shard_cache = TrieCache::new(&trie_config, shard_uid, true);
+    let trie_storage = TrieCachingStorage::new(store, shard_cache, shard_uid, true, None);
+    Trie::new(Box::new(trie_storage), hash, None)
+}
+
 pub(crate) fn view_trie(
     store: Store,
     hash: CryptoHash,
@@ -741,12 +750,20 @@ pub(crate) fn view_trie(
     shard_version: u32,
     max_depth: u32,
 ) -> anyhow::Result<()> {
-    let shard_uid = ShardUId { version: shard_version, shard_id };
-    let trie_config: TrieConfig = Default::default();
-    let shard_cache = TrieCache::new(&trie_config, shard_uid, true);
-    let trie_storage = TrieCachingStorage::new(store, shard_cache, shard_uid, true, None);
-    let trie = Trie::new(Box::new(trie_storage), Trie::EMPTY_ROOT, None);
+    let trie = get_trie(store, hash, shard_id, shard_version);
     trie.print_recursive(&mut std::io::stdout().lock(), &hash, max_depth);
+    Ok(())
+}
+
+pub(crate) fn view_trie_leaves(
+    store: Store,
+    state_root_hash: CryptoHash,
+    shard_id: u32,
+    shard_version: u32,
+    max_depth: u32,
+) -> anyhow::Result<()> {
+    let trie = get_trie(store, state_root_hash, shard_id, shard_version);
+    trie.print_recursive_leaves(&mut std::io::stdout().lock(), max_depth);
     Ok(())
 }
 

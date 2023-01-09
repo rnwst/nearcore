@@ -8,7 +8,7 @@ use near_primitives::account::id::AccountId;
 use near_primitives::hash::CryptoHash;
 use near_primitives::sharding::ChunkHash;
 use near_primitives::types::{BlockHeight, ShardId};
-use near_store::{Mode, Store};
+use near_store::{Mode, NodeStorage, Store, Temperature};
 use nearcore::{load_config, NearConfig};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -79,40 +79,59 @@ pub enum StateViewerSubCommand {
     /// View trie structure.
     #[clap(alias = "view_trie")]
     ViewTrie(ViewTrieCmd),
+    /// View trie structure in a more human friendly way but only starting at state root.
+    #[clap(alias = "view_trie2")]
+    ViewTrie2(ViewTrie2Cmd),
 }
 
 impl StateViewerSubCommand {
-    pub fn run(self, home_dir: &Path, genesis_validation: GenesisValidationMode, mode: Mode) {
+    pub fn run(
+        self,
+        home_dir: &Path,
+        genesis_validation: GenesisValidationMode,
+        mode: Mode,
+        temperature: Temperature,
+    ) {
         let near_config = load_config(home_dir, genesis_validation)
             .unwrap_or_else(|e| panic!("Error loading config: {:#}", e));
+
+        #[cfg(feature = "cold_store")]
+        let cold_store_config: Option<&near_store::StoreConfig> =
+            near_config.config.cold_store.as_ref();
+        #[cfg(not(feature = "cold_store"))]
+        let cold_store_config: Option<std::convert::Infallible> = None;
+
         let store_opener =
-            near_store::NodeStorage::opener(home_dir, &near_config.config.store, None);
-        let store = store_opener.open_in_mode(mode).unwrap();
-        let hot = store.get_store(near_store::Temperature::Hot);
+            NodeStorage::opener(home_dir, &near_config.config.store, cold_store_config);
+
+        let storage = store_opener.open_in_mode(mode).unwrap();
+        let store = storage.get_store(temperature);
+        let db = storage.into_inner(temperature);
         match self {
-            StateViewerSubCommand::Apply(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::ApplyChunk(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::ApplyRange(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::ApplyReceipt(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::ApplyTx(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::Chain(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::CheckBlock => check_block_chunk_existence(near_config, hot),
-            StateViewerSubCommand::Chunks(cmd) => cmd.run(near_config, hot),
-            StateViewerSubCommand::DumpAccountStorage(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::DumpCode(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::DumpState(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::DumpStateParts(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::DumpStateRedis(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::DumpTx(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::EpochInfo(cmd) => cmd.run(home_dir, near_config, hot),
-            StateViewerSubCommand::PartialChunks(cmd) => cmd.run(near_config, hot),
-            StateViewerSubCommand::Peers => peers(store),
-            StateViewerSubCommand::Receipts(cmd) => cmd.run(near_config, hot),
-            StateViewerSubCommand::Replay(cmd) => cmd.run(home_dir, near_config, hot),
+            StateViewerSubCommand::Apply(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::ApplyChunk(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::ApplyRange(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::ApplyReceipt(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::ApplyTx(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::Chain(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::CheckBlock => check_block_chunk_existence(near_config, store),
+            StateViewerSubCommand::Chunks(cmd) => cmd.run(near_config, store),
+            StateViewerSubCommand::DumpAccountStorage(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::DumpCode(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::DumpState(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::DumpStateParts(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::DumpStateRedis(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::DumpTx(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::EpochInfo(cmd) => cmd.run(home_dir, near_config, store),
+            StateViewerSubCommand::PartialChunks(cmd) => cmd.run(near_config, store),
+            StateViewerSubCommand::Peers => peers(db),
+            StateViewerSubCommand::Receipts(cmd) => cmd.run(near_config, store),
+            StateViewerSubCommand::Replay(cmd) => cmd.run(home_dir, near_config, store),
             StateViewerSubCommand::RocksDBStats(cmd) => cmd.run(store_opener.path()),
-            StateViewerSubCommand::State => state(home_dir, near_config, hot),
-            StateViewerSubCommand::ViewChain(cmd) => cmd.run(near_config, hot),
-            StateViewerSubCommand::ViewTrie(cmd) => cmd.run(hot),
+            StateViewerSubCommand::State => state(home_dir, near_config, store),
+            StateViewerSubCommand::ViewChain(cmd) => cmd.run(near_config, store),
+            StateViewerSubCommand::ViewTrie(cmd) => cmd.run(store),
+            StateViewerSubCommand::ViewTrie2(cmd) => cmd.run(store),
         }
     }
 }
@@ -496,6 +515,7 @@ impl ViewChainCmd {
 
 #[derive(Parser)]
 pub struct ViewTrieCmd {
+    /// The hash of the trie node e.g. the state root.
     #[clap(long)]
     hash: String,
     #[clap(long)]
@@ -510,5 +530,25 @@ impl ViewTrieCmd {
     pub fn run(self, store: Store) {
         let hash = CryptoHash::from_str(&self.hash).unwrap();
         view_trie(store, hash, self.shard_id, self.shard_version, self.max_depth).unwrap();
+    }
+}
+
+#[derive(Parser)]
+pub struct ViewTrie2Cmd {
+    #[clap(long)]
+    state_root_hash: String,
+    #[clap(long)]
+    shard_id: u32,
+    #[clap(long)]
+    shard_version: u32,
+    #[clap(long)]
+    max_depth: u32,
+}
+
+impl ViewTrie2Cmd {
+    pub fn run(self, store: Store) {
+        let state_root_hash = CryptoHash::from_str(&self.state_root_hash).unwrap();
+        view_trie_leaves(store, state_root_hash, self.shard_id, self.shard_version, self.max_depth)
+            .unwrap();
     }
 }

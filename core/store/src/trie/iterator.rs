@@ -4,6 +4,7 @@ use crate::trie::nibble_slice::NibbleSlice;
 use crate::trie::{TrieNode, TrieNodeWithSize, ValueHandle};
 use crate::{StorageError, Trie};
 
+/// Crumb is a piece of trie iteration state. It describes a node on the trail and processing status of that node.
 #[derive(Debug)]
 struct Crumb {
     node: TrieNodeWithSize,
@@ -11,6 +12,9 @@ struct Crumb {
     prefix_boundary: bool,
 }
 
+/// The status of processing of a node during trie iteration.
+/// Each node is processed in the following order:
+/// Entering -> At -> AtChild(0) -> ... -> AtChild(15) -> Exiting
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub(crate) enum CrumbStatus {
     Entering,
@@ -44,6 +48,9 @@ pub struct TrieIterator<'a> {
 
     /// If not `None`, a list of all nodes that the iterator has visited.
     visited_nodes: Option<Vec<std::sync::Arc<[u8]>>>,
+
+    /// Max depth of iteration.
+    max_depth: Option<usize>,
 }
 
 pub type TrieItem = (Vec<u8>, Vec<u8>);
@@ -59,12 +66,13 @@ pub struct TrieTraversalItem {
 impl<'a> TrieIterator<'a> {
     #![allow(clippy::new_ret_no_self)]
     /// Create a new iterator.
-    pub(super) fn new(trie: &'a Trie) -> Result<Self, StorageError> {
+    pub(super) fn new(trie: &'a Trie, max_depth: Option<usize>) -> Result<Self, StorageError> {
         let mut r = TrieIterator {
             trie,
             trail: Vec::with_capacity(8),
             key_nibbles: Vec::with_capacity(64),
             visited_nodes: None,
+            max_depth: max_depth,
         };
         r.descend_into_node(&trie.root)?;
         Ok(r)
@@ -238,8 +246,8 @@ impl<'a> TrieIterator<'a> {
                 Some(IterStep::Value(hash))
             }
             (CrumbStatus::At, TrieNode::Extension(key, child)) => {
-                let hash = *child.unwrap_hash();
                 let key = NibbleSlice::from_encoded(key).0;
+                let hash = *child.unwrap_hash();
                 self.key_nibbles.extend(key.iter());
                 Some(IterStep::Descend(hash))
             }
@@ -367,7 +375,17 @@ impl<'a> Iterator for TrieIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let iter_step = self.iter_step()?;
+
+            let can_process = match self.max_depth {
+                Some(max_depth) => self.key_nibbles.len() <= max_depth,
+                None => true,
+            };
+            if !can_process {
+                continue;
+            }
+
             match iter_step {
+                IterStep::Continue => {}
                 IterStep::PopTrail => {
                     self.trail.pop();
                 }
@@ -375,7 +393,6 @@ impl<'a> Iterator for TrieIterator<'a> {
                     Ok(_) => (),
                     Err(err) => return Some(Err(err)),
                 },
-                IterStep::Continue => {}
                 IterStep::Value(hash) => {
                     return Some(
                         self.trie
